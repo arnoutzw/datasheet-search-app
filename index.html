@@ -831,8 +831,6 @@ body {
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.3.0/firebase-app.js';
 import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc, query as fsQuery, orderBy, where, limit, Timestamp }
   from 'https://www.gstatic.com/firebasejs/11.3.0/firebase-firestore.js';
-import { getStorage, ref as storageRef, uploadBytes, getDownloadURL }
-  from 'https://www.gstatic.com/firebasejs/11.3.0/firebase-storage.js';
 
 const firebaseConfig = {
   apiKey: "AIzaSyAqRWVgti-CuXzr5AkhDKmPlu7iA2MQpUg",
@@ -846,8 +844,8 @@ const firebaseConfig = {
 
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
-const storage = getStorage(firebaseApp);
 const PDF_CACHE_COLLECTION = 'pdf_cache';
+const MAX_PDF_SIZE = 900 * 1024; // ~900KB limit (Firestore 1MB doc limit minus metadata)
 
 const STORAGE_KEYS = {
   history: 'ds-search-history',
@@ -1067,6 +1065,26 @@ window.clearCachedPdfs = async function() {
   if (!confirm('Remove all cached PDF entries?')) return;
   await clearCachedPdfs();
   renderCachedPdfs();
+};
+window.openCachedPdf = async function(docId) {
+  try {
+    const snap = await getDocs(collection(db, PDF_CACHE_COLLECTION));
+    const entry = snap.docs.find(d => d.id === docId);
+    if (!entry) return;
+    const data = entry.data();
+    const url = data.datasheetUrl || '';
+    if (url.startsWith('data:')) {
+      // Convert base64 data URL to blob for better browser PDF viewer support
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      window.open(blobUrl, '_blank');
+    } else {
+      window.open(url, '_blank');
+    }
+  } catch (e) {
+    console.warn('Failed to open cached PDF:', e.message);
+  }
 };
 
 // ── DOM refs ──
@@ -1705,6 +1723,12 @@ async function renderCachedPdfs() {
     const mfr = e.manufacturer ? ` \u2022 ${escHtml(e.manufacturer)}` : '';
     const name = e.datasheetName ? escHtml(e.datasheetName) : 'Datasheet';
     const src = e.source ? `<span class="cache-badge">${escHtml(e.source)}</span>` : '';
+    const isDataUrl = (e.datasheetUrl || '').startsWith('data:');
+    const sizeStr = e.fileSize ? ` \u2022 ${(e.fileSize / 1024).toFixed(0)}KB` : '';
+    const urlDisplay = isDataUrl
+      ? `<span style="color:var(--success);font-size:11px">PDF stored locally${sizeStr}</span>`
+      : `<a href="${escHtml(e.datasheetUrl)}" target="_blank" rel="noopener">${escHtml(e.datasheetUrl)}</a>`;
+    const openLabel = isDataUrl ? 'View PDF' : '↗';
     return `<div class="cache-item">
       <div class="cache-item-icon">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
@@ -1712,10 +1736,10 @@ async function renderCachedPdfs() {
       <div class="cache-item-text">
         <div class="cache-item-name">${escHtml(e.partNumber || 'Unknown')}${src}</div>
         <div class="cache-item-detail">${name}${mfr} \u2022 ${ago}</div>
-        <div class="cache-item-detail"><a href="${escHtml(e.datasheetUrl)}" target="_blank" rel="noopener">${escHtml(e.datasheetUrl)}</a></div>
+        <div class="cache-item-detail">${urlDisplay}</div>
       </div>
       <div class="list-item-actions">
-        <a href="${escHtml(e.datasheetUrl)}" target="_blank" rel="noopener" class="icon-btn" title="Open PDF" style="text-decoration:none">↗</a>
+        <button class="icon-btn" title="Open PDF" onclick="openCachedPdf('${escAttr(e.id)}')" style="font-size:11px">${openLabel}</button>
         <button class="icon-btn danger" onclick="removeCachedPdf('${escAttr(e.id)}')" title="Remove">✕</button>
       </div>
     </div>`;
@@ -1818,22 +1842,25 @@ function attachHistoryDropHandlers() {
       const partQuery = item.dataset.dropQuery;
       const file = files[0];
 
+      if (file.size > MAX_PDF_SIZE) {
+        const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+        showDropStatus(item, 'error', `PDF too large (${sizeMB}MB). Max ~900KB.`);
+        return;
+      }
+
       item.classList.add('drop-uploading');
-      showDropStatus(item, 'uploading', `Uploading ${file.name}...`);
+      showDropStatus(item, 'uploading', `Caching ${file.name}...`);
 
       try {
-        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const path = `pdfs/${partQuery}/${Date.now()}_${safeName}`;
-        const fileRef = storageRef(storage, path);
-        await uploadBytes(fileRef, file, { contentType: 'application/pdf' });
-        const downloadUrl = await getDownloadURL(fileRef);
+        const base64 = await fileToBase64(file);
 
         await cachePdf({
           partNumber: partQuery,
           manufacturer: '',
-          datasheetUrl: downloadUrl,
+          datasheetUrl: base64,
           datasheetName: file.name,
           source: 'User Upload',
+          fileSize: file.size,
         });
 
         item.classList.remove('drop-uploading');
@@ -1845,7 +1872,7 @@ function attachHistoryDropHandlers() {
         }, 2000);
       } catch (err) {
         item.classList.remove('drop-uploading');
-        showDropStatus(item, 'error', 'Upload failed: ' + err.message);
+        showDropStatus(item, 'error', 'Cache failed: ' + err.message);
         setTimeout(() => renderHistory(), 3000);
       }
     });
@@ -1855,10 +1882,19 @@ function attachHistoryDropHandlers() {
 function hasPdfFile(e) {
   if (e.dataTransfer.items) {
     for (const item of e.dataTransfer.items) {
-      if (item.kind === 'file' && (item.type === 'application/pdf' || true)) return true;
+      if (item.kind === 'file') return true;
     }
   }
   return e.dataTransfer.types.includes('Files');
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result); // data:application/pdf;base64,...
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
 }
 
 function showDropStatus(item, type, message) {
