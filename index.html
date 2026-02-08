@@ -589,6 +589,63 @@ body {
   .search-box button { width: 100%; }
   .header { padding: 12px 16px; }
 }
+/* Cached PDFs tab */
+.cache-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+  transition: border-color .12s;
+}
+.cache-item:hover { border-color: var(--bg-3); }
+.cache-item-icon {
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-bg);
+  border-radius: 6px;
+  color: var(--accent);
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.cache-item-text { flex: 1; min-width: 0; }
+.cache-item-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--tx-1);
+  font-family: 'Courier New', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cache-item-detail {
+  font-size: 11px;
+  color: var(--tx-3);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cache-item-detail a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.cache-item-detail a:hover { text-decoration: underline; }
+.cache-badge {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 600;
+  margin-left: 6px;
+}
 </style>
 </head>
 <body>
@@ -627,6 +684,7 @@ body {
   <button class="tab-btn active" data-tab="browse">Browse</button>
   <button class="tab-btn" data-tab="history">History</button>
   <button class="tab-btn" data-tab="bookmarks">Bookmarks</button>
+  <button class="tab-btn" data-tab="cached">Cached PDFs</button>
 </div>
 
 <div class="content">
@@ -657,6 +715,11 @@ body {
   <!-- Bookmarks tab -->
   <div class="tab-panel" id="tab-bookmarks">
     <div id="bookmarks-list"></div>
+  </div>
+
+  <!-- Cached PDFs tab -->
+  <div class="tab-panel" id="tab-cached">
+    <div id="cached-list"></div>
   </div>
 
 </div>
@@ -701,11 +764,31 @@ body {
   </div>
 </div>
 
-<script>
+<script type="module">
 // ===================================================================
 // DATASHEET SEARCH APP — Link Mode + NEXAR API + TrustedParts API
 // Credentials encrypted with AES-256-GCM, admin-only access
+// PDF cache backed by Firebase Firestore
 // ===================================================================
+
+// ── Firebase Setup ──
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.3.0/firebase-app.js';
+import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc, query as fsQuery, orderBy, where, limit, Timestamp }
+  from 'https://www.gstatic.com/firebasejs/11.3.0/firebase-firestore.js';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyAqRWVgti-CuXzr5AkhDKmPlu7iA2MQpUg",
+  authDomain: "arnout-s-homelab.firebaseapp.com",
+  projectId: "arnout-s-homelab",
+  storageBucket: "arnout-s-homelab.firebasestorage.app",
+  messagingSenderId: "258011834485",
+  appId: "1:258011834485:web:5afb1efaa303b4dd93f03c",
+  measurementId: "G-VXDKDLXP7L"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+const PDF_CACHE_COLLECTION = 'pdf_cache';
 
 const STORAGE_KEYS = {
   history: 'ds-search-history',
@@ -857,6 +940,75 @@ function clearAllCredentials() {
   nexarToken = null;
   nexarTokenExp = 0;
 }
+
+// ── PDF Cache (Firestore) ──
+async function cachePdf(entry) {
+  // entry: { partNumber, manufacturer, datasheetUrl, datasheetName, source }
+  try {
+    // Check if this URL is already cached to avoid duplicates
+    const q = fsQuery(
+      collection(db, PDF_CACHE_COLLECTION),
+      where('datasheetUrl', '==', entry.datasheetUrl),
+      limit(1)
+    );
+    const existing = await getDocs(q);
+    if (!existing.empty) {
+      // Update timestamp on existing entry (re-accessed)
+      const docRef = existing.docs[0].ref;
+      await deleteDoc(docRef);
+    }
+    await addDoc(collection(db, PDF_CACHE_COLLECTION), {
+      ...entry,
+      cachedAt: Timestamp.now(),
+    });
+  } catch (e) {
+    console.warn('PDF cache write failed:', e.message);
+  }
+}
+
+async function loadCachedPdfs() {
+  try {
+    const q = fsQuery(
+      collection(db, PDF_CACHE_COLLECTION),
+      orderBy('cachedAt', 'desc'),
+      limit(100)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  } catch (e) {
+    console.warn('PDF cache read failed:', e.message);
+    return [];
+  }
+}
+
+async function removeCachedPdf(docId) {
+  try {
+    await deleteDoc(doc(db, PDF_CACHE_COLLECTION, docId));
+  } catch (e) {
+    console.warn('PDF cache delete failed:', e.message);
+  }
+}
+
+async function clearCachedPdfs() {
+  try {
+    const snap = await getDocs(collection(db, PDF_CACHE_COLLECTION));
+    const deletes = snap.docs.map(d => deleteDoc(d.ref));
+    await Promise.all(deletes);
+  } catch (e) {
+    console.warn('PDF cache clear failed:', e.message);
+  }
+}
+
+// Make cache functions available to onclick handlers
+window.removeCachedPdf = async function(docId) {
+  await removeCachedPdf(docId);
+  renderCachedPdfs();
+};
+window.clearCachedPdfs = async function() {
+  if (!confirm('Remove all cached PDF entries?')) return;
+  await clearCachedPdfs();
+  renderCachedPdfs();
+};
 
 // ── DOM refs ──
 const modePills  = document.getElementById('mode-pills');
@@ -1104,7 +1256,8 @@ function showLinkResults(query) {
   html += '<div class="source-row">';
   for (const src of SOURCES) {
     const url = src.url.replace('{q}', encodeURIComponent(query));
-    html += `<a href="${url}" target="_blank" rel="noopener" class="source-link">${src.icon} ${src.name} <span class="arrow">↗</span></a>`;
+    html += `<a href="${url}" target="_blank" rel="noopener" class="source-link"
+      data-cache-pdf data-part="${escHtml(query)}" data-mfr="" data-ds-name="${escHtml(src.name)}" data-ds-url="${escHtml(url)}">${src.icon} ${src.name} <span class="arrow">↗</span></a>`;
   }
   html += '</div>';
 
@@ -1202,7 +1355,12 @@ function renderPartCard(p, query) {
 
   html += '<div class="part-card-actions">';
   if (ds?.url) {
-    html += `<a href="${escHtml(ds.url)}" target="_blank" rel="noopener" class="ds-btn">
+    html += `<a href="${escHtml(ds.url)}" target="_blank" rel="noopener" class="ds-btn"
+      data-cache-pdf
+      data-part="${escHtml(p.mpn || '')}"
+      data-mfr="${escHtml(mfr)}"
+      data-ds-name="${escHtml(ds.name || '')}"
+      data-ds-url="${escHtml(ds.url)}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
       Datasheet${ds.name ? ' (' + escHtml(ds.name) + ')' : ''}
     </a>`;
@@ -1469,6 +1627,39 @@ function renderBookmarks() {
   ).join('');
 }
 
+async function renderCachedPdfs() {
+  const el = document.getElementById('cached-list');
+  el.innerHTML = '<div class="api-loading"><div class="spinner"></div><div>Loading cached PDFs...</div></div>';
+  const entries = await loadCachedPdfs();
+  if (entries.length === 0) {
+    el.innerHTML = '<div class="list-empty">No cached PDFs yet.<br>Datasheets you open will be saved here for quick access.</div>';
+    return;
+  }
+  let html = entries.map(e => {
+    const ts = e.cachedAt?.toDate ? e.cachedAt.toDate() : new Date(e.cachedAt);
+    const ago = timeAgo(ts);
+    const mfr = e.manufacturer ? ` \u2022 ${escHtml(e.manufacturer)}` : '';
+    const name = e.datasheetName ? escHtml(e.datasheetName) : 'Datasheet';
+    const src = e.source ? `<span class="cache-badge">${escHtml(e.source)}</span>` : '';
+    return `<div class="cache-item">
+      <div class="cache-item-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      </div>
+      <div class="cache-item-text">
+        <div class="cache-item-name">${escHtml(e.partNumber || 'Unknown')}${src}</div>
+        <div class="cache-item-detail">${name}${mfr} \u2022 ${ago}</div>
+        <div class="cache-item-detail"><a href="${escHtml(e.datasheetUrl)}" target="_blank" rel="noopener">${escHtml(e.datasheetUrl)}</a></div>
+      </div>
+      <div class="list-item-actions">
+        <a href="${escHtml(e.datasheetUrl)}" target="_blank" rel="noopener" class="icon-btn" title="Open PDF" style="text-decoration:none">↗</a>
+        <button class="icon-btn danger" onclick="removeCachedPdf('${escAttr(e.id)}')" title="Remove">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+  html += '<button class="clear-btn" onclick="clearCachedPdfs()">Clear All Cached PDFs</button>';
+  el.innerHTML = html;
+}
+
 function removeHistory(query) {
   searchHistory = searchHistory.filter(h => h.query !== query);
   saveHistory();
@@ -1497,6 +1688,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
   if (name === 'history') renderHistory();
   if (name === 'bookmarks') renderBookmarks();
+  if (name === 'cached') renderCachedPdfs();
   if (name === 'browse') {
     const q = document.getElementById('search-input').value.trim();
     if (!q) clearSearchResults();
@@ -1516,6 +1708,22 @@ function timeAgo(date) {
   return date.toLocaleDateString();
 }
 
+// ── PDF Cache Click Interceptor ──
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-cache-pdf]');
+  if (!link) return;
+  const entry = {
+    partNumber: link.dataset.part || '',
+    manufacturer: link.dataset.mfr || '',
+    datasheetUrl: link.dataset.dsUrl || link.href || '',
+    datasheetName: link.dataset.dsName || '',
+    source: link.classList.contains('source-link') ? 'Link Search' : 'NEXAR',
+  };
+  if (entry.datasheetUrl) {
+    cachePdf(entry); // fire-and-forget, don't block the link opening
+  }
+});
+
 // ── Init ──
 document.getElementById('btn-search').addEventListener('click', () => doSearch(document.getElementById('search-input').value));
 document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(e.target.value); });
@@ -1530,6 +1738,14 @@ if (localStorage.getItem('ds-nexar-client-id')) {
 
 // Settings button starts locked (admin auth required)
 btnSettings.classList.add('locked');
+
+// Expose functions to global scope for inline onclick handlers
+window.doSearch = doSearch;
+window.toggleBookmark = toggleBookmark;
+window.removeHistory = removeHistory;
+window.clearHistory = clearHistory;
+window.removeBookmark = removeBookmark;
+window.showCategory = showCategory;
 
 updateModeUI();
 renderPopular();
