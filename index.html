@@ -711,6 +711,13 @@ body {
   padding: 14px 16px;
   margin-bottom: 14px;
 }
+.cached-pdf-banner.partial {
+  background: linear-gradient(135deg, rgba(245,158,11,.08), rgba(245,158,11,.04));
+  border-color: rgba(245,158,11,.3);
+}
+.cached-pdf-banner.partial .cached-pdf-banner-title { color: var(--accent); }
+.cached-pdf-banner.partial .cache-item-icon { background: var(--accent-bg); color: var(--accent); }
+.cached-pdf-banner.partial .cached-pdf-open { background: var(--accent); }
 .cached-pdf-banner-title {
   font-size: 12px;
   font-weight: 700;
@@ -1092,17 +1099,23 @@ async function loadCachedPdfs() {
 
 async function getCachedPdfsForPart(query) {
   try {
-    const q = fsQuery(
-      collection(db, PDF_CACHE_COLLECTION),
-      where('partNumberLower', '==', query.toLowerCase())
-    );
-    const snap = await getDocs(q);
-    const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    // Only return entries that have actual PDF data (user uploads)
-    return docs.filter(d => (d.datasheetUrl || '').startsWith('data:'));
+    const snap = await getDocs(collection(db, PDF_CACHE_COLLECTION));
+    const qLower = query.toLowerCase();
+    const results = { exact: [], partial: [] };
+    for (const d of snap.docs) {
+      const data = d.data();
+      if (!(data.datasheetUrl || '').startsWith('data:')) continue;
+      const pn = (data.partNumberLower || (data.partNumber || '').toLowerCase());
+      if (pn === qLower) {
+        results.exact.push({ id: d.id, ...data });
+      } else if (pn.includes(qLower) || qLower.includes(pn)) {
+        results.partial.push({ id: d.id, ...data });
+      }
+    }
+    return results;
   } catch (e) {
     console.warn('PDF cache lookup failed:', e.message);
-    return [];
+    return { exact: [], partial: [] };
   }
 }
 
@@ -1373,11 +1386,18 @@ async function doSearch(query) {
   switchTab('browse');
 
   // Check for cached PDFs first — if found, serve immediately without opening external sites
-  const cachedPdfs = await getCachedPdfsForPart(query);
-  if (cachedPdfs.length > 0) {
-    showCachedPdfResult(query, cachedPdfs);
-    // Auto-open the first cached PDF
-    openCachedPdf(cachedPdfs[0].id);
+  const cached = await getCachedPdfsForPart(query);
+
+  if (cached.exact.length > 0) {
+    // Exact match: auto-open the PDF, don't hit external sites
+    showCachedPdfResult(query, cached.exact, false);
+    openCachedPdf(cached.exact[0].id);
+    return;
+  }
+
+  if (cached.partial.length > 0) {
+    // Partial match: show the cached PDFs but don't auto-open, don't hit external sites
+    showCachedPdfResult(query, cached.partial, true);
     return;
   }
 
@@ -1390,20 +1410,25 @@ async function doSearch(query) {
   }
 }
 
-function showCachedPdfResult(query, cachedPdfs) {
+function showCachedPdfResult(query, cachedPdfs, isPartial) {
   const resultsEl = document.getElementById('search-results');
   const browseEl = document.getElementById('browse-content');
   const isBookmarked = bookmarks.some(b => b.query.toLowerCase() === query.toLowerCase());
 
-  let html = `<div class="cached-pdf-banner">
+  const titleText = isPartial
+    ? `Similar cached PDF${cachedPdfs.length > 1 ? 's' : ''} for "${escHtml(query)}"`
+    : `Cached PDF${cachedPdfs.length > 1 ? 's' : ''} found for ${escHtml(query)}`;
+
+  let html = `<div class="cached-pdf-banner${isPartial ? ' partial' : ''}">
     <div class="cached-pdf-banner-title">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-      Cached PDF${cachedPdfs.length > 1 ? 's' : ''} found for ${escHtml(query)}
+      ${titleText}
       <button class="icon-btn${isBookmarked ? ' bookmarked' : ''}" onclick="toggleBookmark('${escAttr(query)}')" title="Bookmark" style="display:inline-flex;width:24px;height:24px;font-size:13px;margin-left:auto">${isBookmarked ? '★' : '☆'}</button>
     </div>`;
 
   for (const pdf of cachedPdfs) {
     const name = pdf.datasheetName ? escHtml(pdf.datasheetName) : 'Datasheet';
+    const partLabel = isPartial ? `<span style="color:var(--accent);font-family:monospace;font-weight:700">${escHtml(pdf.partNumber || '')}</span> \u2022 ` : '';
     const ts = pdf.cachedAt?.toDate ? pdf.cachedAt.toDate() : new Date();
     const sizeStr = pdf.fileSize ? ` \u2022 ${(pdf.fileSize / 1024).toFixed(0)}KB` : '';
     html += `<div class="cached-pdf-card">
@@ -1412,7 +1437,7 @@ function showCachedPdfResult(query, cachedPdfs) {
       </div>
       <div class="cache-item-text">
         <div class="cache-item-name">${name}</div>
-        <div class="cache-item-detail">Cached ${timeAgo(ts)}${sizeStr}</div>
+        <div class="cache-item-detail">${partLabel}Cached ${timeAgo(ts)}${sizeStr}</div>
       </div>
       <button class="cached-pdf-open" onclick="openCachedPdf('${escAttr(pdf.id)}')">Open PDF</button>
     </div>`;
