@@ -1372,10 +1372,13 @@ async function doSearch(query) {
 
   switchTab('browse');
 
-  // Check for cached PDFs and show them above results
+  // Check for cached PDFs first — if found, serve immediately without opening external sites
   const cachedPdfs = await getCachedPdfsForPart(query);
   if (cachedPdfs.length > 0) {
-    showCachedPdfBanner(query, cachedPdfs);
+    showCachedPdfResult(query, cachedPdfs);
+    // Auto-open the first cached PDF
+    openCachedPdf(cachedPdfs[0].id);
+    return;
   }
 
   if (searchMode === 'nexar') {
@@ -1387,14 +1390,16 @@ async function doSearch(query) {
   }
 }
 
-function showCachedPdfBanner(query, cachedPdfs) {
+function showCachedPdfResult(query, cachedPdfs) {
   const resultsEl = document.getElementById('search-results');
   const browseEl = document.getElementById('browse-content');
+  const isBookmarked = bookmarks.some(b => b.query.toLowerCase() === query.toLowerCase());
 
   let html = `<div class="cached-pdf-banner">
     <div class="cached-pdf-banner-title">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
       Cached PDF${cachedPdfs.length > 1 ? 's' : ''} found for ${escHtml(query)}
+      <button class="icon-btn${isBookmarked ? ' bookmarked' : ''}" onclick="toggleBookmark('${escAttr(query)}')" title="Bookmark" style="display:inline-flex;width:24px;height:24px;font-size:13px;margin-left:auto">${isBookmarked ? '★' : '☆'}</button>
     </div>`;
 
   for (const pdf of cachedPdfs) {
@@ -1414,6 +1419,14 @@ function showCachedPdfBanner(query, cachedPdfs) {
   }
   html += '</div>';
 
+  // Show source links below so user can still search externally
+  html += '<div style="margin-top:14px"><div class="parts-title">Or search online</div><div class="source-row" style="justify-content:flex-start">';
+  for (const src of SOURCES) {
+    const url = src.url.replace('{q}', encodeURIComponent(query));
+    html += `<a href="${url}" target="_blank" rel="noopener" class="source-link">${src.icon} ${src.name} <span class="arrow">↗</span></a>`;
+  }
+  html += '</div></div>';
+
   resultsEl.innerHTML = html;
   resultsEl.style.display = 'block';
   browseEl.style.display = 'none';
@@ -1430,12 +1443,7 @@ function showLinkResults(query) {
   const browseEl = document.getElementById('browse-content');
   const isBookmarked = bookmarks.some(b => b.query.toLowerCase() === query.toLowerCase());
 
-  // Preserve cached PDF banner if present
-  const existingBanner = resultsEl.querySelector('.cached-pdf-banner');
-  const bannerHtml = existingBanner ? existingBanner.outerHTML : '';
-
-  let html = bannerHtml;
-  html += `<div class="search-status">
+  let html = `<div class="search-status">
     <p>Searching for <strong style="color:var(--accent);font-family:'Courier New',monospace">${escHtml(query)}</strong></p>
     <p style="margin-top:4px">AllDatasheet opened in a new tab.
       <button class="icon-btn${isBookmarked ? ' bookmarked' : ''}" onclick="toggleBookmark('${escAttr(query)}')" title="${isBookmarked ? 'Remove bookmark' : 'Bookmark this search'}" style="display:inline-flex;vertical-align:middle;margin-left:4px">${isBookmarked ? '★' : '☆'}</button>
@@ -1461,11 +1469,7 @@ async function doNexarSearch(query) {
   searching = true;
   btnSearch.disabled = true;
 
-  // Preserve cached PDF banner
-  const existingBanner = resultsEl.querySelector('.cached-pdf-banner');
-  const bannerHtml = existingBanner ? existingBanner.outerHTML : '';
-
-  resultsEl.innerHTML = bannerHtml + `<div class="api-loading"><div class="spinner"></div><div>Searching NEXAR for <strong style="color:var(--accent);font-family:monospace">${escHtml(query)}</strong>...</div></div>`;
+  resultsEl.innerHTML = `<div class="api-loading"><div class="spinner"></div><div>Searching NEXAR for <strong style="color:var(--accent);font-family:monospace">${escHtml(query)}</strong>...</div></div>`;
   resultsEl.style.display = 'block';
   browseEl.style.display = 'none';
 
@@ -1473,9 +1477,7 @@ async function doNexarSearch(query) {
     const data = await nexarSearch(query);
     renderApiResults(query, data);
   } catch (e) {
-    const eb = resultsEl.querySelector('.cached-pdf-banner');
-    const ebHtml = eb ? eb.outerHTML : '';
-    resultsEl.innerHTML = ebHtml + `<div class="api-error">Search failed: ${escHtml(e.message)}<code>Check your API credentials in Settings, or switch to Link Mode.</code></div>`;
+    resultsEl.innerHTML = `<div class="api-error">Search failed: ${escHtml(e.message)}<code>Check your API credentials in Settings, or switch to Link Mode.</code></div>`;
   } finally {
     searching = false;
     btnSearch.disabled = false;
@@ -1487,11 +1489,7 @@ function renderApiResults(query, data) {
   const results = data.results || [];
   const isBookmarked = bookmarks.some(b => b.query.toLowerCase() === query.toLowerCase());
 
-  // Preserve cached PDF banner
-  const existingBanner = resultsEl.querySelector('.cached-pdf-banner');
-  const bannerHtml = existingBanner ? existingBanner.outerHTML : '';
-
-  let html = bannerHtml + `<div class="api-results-header">
+  let html = `<div class="api-results-header">
     <h3>Results for <span style="color:var(--accent);font-family:'Courier New',monospace">${escHtml(query)}</span>
       <button class="icon-btn${isBookmarked ? ' bookmarked' : ''}" onclick="toggleBookmark('${escAttr(query)}')" title="Bookmark" style="display:inline-flex;vertical-align:middle;margin-left:4px;width:24px;height:24px;font-size:13px">${isBookmarked ? '★' : '☆'}</button>
     </h3>
@@ -1598,11 +1596,7 @@ async function doTpSearch(query) {
   searching = true;
   btnSearch.disabled = true;
 
-  // Preserve cached PDF banner
-  const existingBanner = resultsEl.querySelector('.cached-pdf-banner');
-  const bannerHtml = existingBanner ? existingBanner.outerHTML : '';
-
-  resultsEl.innerHTML = bannerHtml + `<div class="api-loading"><div class="spinner"></div><div>Searching TrustedParts for <strong style="color:var(--accent);font-family:monospace">${escHtml(query)}</strong>...</div></div>`;
+  resultsEl.innerHTML = `<div class="api-loading"><div class="spinner"></div><div>Searching TrustedParts for <strong style="color:var(--accent);font-family:monospace">${escHtml(query)}</strong>...</div></div>`;
   resultsEl.style.display = 'block';
   browseEl.style.display = 'none';
 
@@ -1610,9 +1604,7 @@ async function doTpSearch(query) {
     const data = await trustedPartsSearch(query);
     renderTpResults(query, data);
   } catch (e) {
-    const eb = resultsEl.querySelector('.cached-pdf-banner');
-    const ebHtml = eb ? eb.outerHTML : '';
-    resultsEl.innerHTML = ebHtml + `<div class="api-error">Search failed: ${escHtml(e.message)}<code>Check your TrustedParts credentials in Settings, or switch to Link Mode.</code></div>`;
+    resultsEl.innerHTML = `<div class="api-error">Search failed: ${escHtml(e.message)}<code>Check your TrustedParts credentials in Settings, or switch to Link Mode.</code></div>`;
   } finally {
     searching = false;
     btnSearch.disabled = false;
@@ -1622,10 +1614,6 @@ async function doTpSearch(query) {
 function renderTpResults(query, data) {
   const resultsEl = document.getElementById('search-results');
   const isBookmarked = bookmarks.some(b => b.query.toLowerCase() === query.toLowerCase());
-
-  // Preserve cached PDF banner
-  const existingBanner = resultsEl.querySelector('.cached-pdf-banner');
-  const bannerHtml = existingBanner ? existingBanner.outerHTML : '';
 
   // TrustedParts v2 returns an array of results per part number
   const products = Array.isArray(data) ? data : (data.Products || data.products || [data]);
@@ -1638,7 +1626,7 @@ function renderTpResults(query, data) {
     }
   }
 
-  let html = bannerHtml + `<div class="api-results-header">
+  let html = `<div class="api-results-header">
     <h3>TrustedParts: <span style="color:var(--accent);font-family:monospace">${escHtml(query)}</span>
       <button class="icon-btn${isBookmarked ? ' bookmarked' : ''}" onclick="toggleBookmark('${escAttr(query)}')" title="Bookmark" style="display:inline-flex;vertical-align:middle;margin-left:4px;width:24px;height:24px;font-size:13px">${isBookmarked ? '★' : '☆'}</button>
     </h3>
